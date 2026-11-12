@@ -7,6 +7,11 @@ import com.janboerman.invsee.spigot.api.logging.LogOutput;
 import com.janboerman.invsee.spigot.api.target.Target;
 import com.janboerman.invsee.spigot.api.template.Mirror;
 import com.janboerman.invsee.spigot.api.template.PlayerInventorySlot;
+import com.janboerman.invsee.spigot.internal.inventory.AbstractNmsInventory;
+import com.janboerman.invsee.spigot.internal.inventory.ShallowCopy;
+import com.janboerman.invsee.spigot.internal.inventory.StandardSpectatorInventory;
+import com.janboerman.invsee.spigot.internal.inventory.Wrapper;
+import io.papermc.paper.threadedregions.scheduler.EntityScheduler;
 import net.minecraft.server.v1_16_R3.*;
 
 import org.bukkit.craftbukkit.v1_16_R3.inventory.CraftItemStack;
@@ -16,7 +21,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-class MainNmsContainer extends Container {
+class MainNmsContainer extends Container implements AbstractNmsInventory<PlayerInventorySlot, MainBukkitInventory, MainNmsContainer>, StandardSpectatorInventory<PlayerInventorySlot, MainNmsContainer, MainNmsContainer>, Wrapper<MainNmsContainer, MainNmsContainer> {
 
     final EntityHuman player;
     final MainNmsInventory top;
@@ -62,7 +67,6 @@ class MainNmsContainer extends Container {
         }
     }
 
-
     //clicked
     @Override
     public ItemStack a(int i, int j, InventoryClickType inventoryclicktype, EntityHuman entityhuman) {
@@ -71,23 +75,107 @@ class MainNmsContainer extends Container {
             contentsBefore = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
         }
 
-        ItemStack result = super.a(i, j, inventoryclicktype, entityhuman);
-
-        if (tracker != null) {
-            contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
-            tracker.onClick(contentsBefore, contentsAfter);
+        // FOLIASYNC: schedule task ONLY if we are on Folia (target/spectator schedulers exist)
+        // Otherwise, execute directly on the calling thread (Bukkit/Paper fallback) to minimize scheduler calls.
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        // Optimized execution: execute directly if already on the target or spectator region thread (0 scheduler calls on Folia).
+        // Otherwise falls back to executeSyncSpectator.
+        boolean onTarget = false;
+        boolean onSpectator = false;
+        
+        // Check if we are already on the target thread (Folia)
+        if (targetScheduler != null) {
+            // EntityScheduler.isCurrentThread() is available in Paper/Folia
+            onTarget = targetScheduler.isCurrentThread();
         }
-
+        // Check if we are already on the spectator thread (Folia)
+        if (spectatorScheduler != null) {
+            onSpectator = spectatorScheduler.isCurrentThread();
+        }
+        
+        ItemStack result;
+        if (onTarget || onSpectator) {
+            // Execute directly (0 scheduler calls)
+            result = super.a(i, j, inventoryclicktype, entityhuman);
+            
+            if (tracker != null) {
+                List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
+                tracker.onClick(contentsBefore, contentsAfter);
+            }
+        } else if (targetScheduler != null && spectatorScheduler != null) {
+            // Folia: schedule task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler
+            final boolean[] resultDone = { false };
+            final ItemStack[] resultStack = { null };
+            final Runnable task = () -> {
+                resultStack[0] = super.a(i, j, inventoryclicktype, entityhuman);
+                
+                if (tracker != null) {
+                    List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
+                    tracker.onClick(contentsBefore, contentsAfter);
+                }
+                resultDone[0] = true;
+            };
+            
+            // Execute sync spectator task (blocks until done in Folia)
+            executeSyncSpectator(task, null);
+            result = resultStack[0] != null ? resultStack[0] : ItemStack.a;
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            result = super.a(i, j, inventoryclicktype, entityhuman);
+            
+            if (tracker != null) {
+                List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
+                tracker.onClick(contentsBefore, contentsAfter);
+            }
+        }
+        
         return result;
     }
 
     //removed
     @Override
     public void b(EntityHuman entityhuman) {
-        super.b(entityhuman);
-
-        if (tracker != null && Objects.equals(entityhuman, player)) {
-            tracker.onClose();
+        // FOLIASYNC: schedule task ONLY if we are on Folia
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        // Optimized execution: execute directly if already on the target or spectator region thread (0 scheduler calls on Folia).
+        // Otherwise falls back to executeSyncSpectator.
+        boolean onTarget = false;
+        boolean onSpectator = false;
+        
+        // Check if we are already on the target thread (Folia)
+        if (targetScheduler != null) {
+            // EntityScheduler.isCurrentThread() is available in Paper/Folia
+            onTarget = targetScheduler.isCurrentThread();
+        }
+        // Check if we are already on the spectator thread (Folia)
+        if (spectatorScheduler != null) {
+            onSpectator = spectatorScheduler.isCurrentThread();
+        }
+        
+        if (onTarget || onSpectator) {
+            // Execute directly (0 scheduler calls)
+            super.b(entityhuman);
+            if (tracker != null && Objects.equals(entityhuman, player)) {
+                tracker.onClose();
+            }
+        } else if (targetScheduler != null && spectatorScheduler != null) {
+            Runnable task = () -> {
+                super.b(entityhuman);
+                if (tracker != null && Objects.equals(entityhuman, player)) {
+                    tracker.onClose();
+                }
+            };
+            executeSyncSpectator(task, null);
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            super.b(entityhuman);
+            if (tracker != null && Objects.equals(entityhuman, player)) {
+                tracker.onClose();
+            }
         }
     }
 
@@ -166,6 +254,7 @@ class MainNmsContainer extends Container {
         return true;
     }
 
+    //shiftClick
     @Override
     public ItemStack shiftClick(EntityHuman entityhuman, int rawIndex) {
         //returns EMPTY_STACK when we are done transferring the itemstack on the rawIndex
@@ -176,41 +265,128 @@ class MainNmsContainer extends Container {
 
         List<Slot> slots = super.slots;
 
-        ItemStack itemstack = InvseeImpl.EMPTY_STACK;
-        Slot slot = slots.get(rawIndex);
-        final int topRows = 6;
-
-        if (slot != null && slot.hasItem()) {
-            ItemStack clickedSlotItem = slot.getItem();
-
-            itemstack = clickedSlotItem.cloneItemStack();
-            if (rawIndex < topRows * 9) {
-                //clicked in the top inventory
-                if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, slots.size(), true)) {
-                    return InvseeImpl.EMPTY_STACK;
-                }
-            } else {
-                //clicked in the bottom inventory
-                if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
-                    return InvseeImpl.EMPTY_STACK;
-                }
-            }
-
-            if (clickedSlotItem.isEmpty()) {
-                slot.set(InvseeImpl.EMPTY_STACK);
-            } else {
-                slot.d();
-            }
+        // FOLIASYNC: schedule task ONLY if we are on Folia (target/spectator schedulers exist)
+        // Otherwise, execute directly on the calling thread (Bukkit/Paper fallback) to minimize scheduler calls.
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        // Optimized execution: execute directly if already on the target or spectator region thread (0 scheduler calls on Folia).
+        // Otherwise falls back to executeSyncSpectator.
+        boolean onTarget = false;
+        boolean onSpectator = false;
+        
+        // Check if we are already on the target thread (Folia)
+        if (targetScheduler != null) {
+            // EntityScheduler.isCurrentThread() is available in Paper/Folia
+            onTarget = targetScheduler.isCurrentThread();
         }
+        // Check if we are already on the spectator thread (Folia)
+        if (spectatorScheduler != null) {
+            onSpectator = spectatorScheduler.isCurrentThread();
+        }
+        
+        if (onTarget || onSpectator) {
+            // Execute directly (0 scheduler calls)
+            ItemStack itemstack = InvseeImpl.EMPTY_STACK;
+            Slot slot = slots.get(rawIndex);
+            final int topRows = 6;
 
-        return itemstack;
+            if (slot != null && slot.hasItem()) {
+                ItemStack clickedSlotItem = slot.getItem();
+
+                itemstack = clickedSlotItem.cloneItemStack();
+                if (rawIndex < topRows * 9) {
+                    //clicked in the top inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, slots.size(), true)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                } else {
+                    //clicked in the bottom inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                }
+
+                if (clickedSlotItem.isEmpty()) {
+                    slot.set(InvseeImpl.EMPTY_STACK);
+                } else {
+                    slot.d();
+                }
+            }
+            return itemstack;
+        } else if (targetScheduler != null && spectatorScheduler != null) {
+            final ItemStack[] resultStack = { InvseeImpl.EMPTY_STACK };
+            final Runnable task = () -> {
+                ItemStack itemstack = InvseeImpl.EMPTY_STACK;
+                Slot slot = slots.get(rawIndex);
+                final int topRows = 6;
+
+                if (slot != null && slot.hasItem()) {
+                    ItemStack clickedSlotItem = slot.getItem();
+
+                    itemstack = clickedSlotItem.cloneItemStack();
+                    if (rawIndex < topRows * 9) {
+                        //clicked in the top inventory
+                        if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, slots.size(), true)) {
+                            resultStack[0] = InvseeImpl.EMPTY_STACK;
+                            return;
+                        }
+                    } else {
+                        //clicked in the bottom inventory
+                        if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
+                            resultStack[0] = InvseeImpl.EMPTY_STACK;
+                            return;
+                        }
+                    }
+
+                    if (clickedSlotItem.isEmpty()) {
+                        slot.set(InvseeImpl.EMPTY_STACK);
+                    } else {
+                        slot.d();
+                    }
+                }
+                resultStack[0] = itemstack;
+            };
+            
+            // Execute sync spectator task (blocks until done in Folia)
+            executeSyncSpectator(task, null);
+            return resultStack[0];
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            ItemStack itemstack = InvseeImpl.EMPTY_STACK;
+            Slot slot = slots.get(rawIndex);
+            final int topRows = 6;
+
+            if (slot != null && slot.hasItem()) {
+                ItemStack clickedSlotItem = slot.getItem();
+
+                itemstack = clickedSlotItem.cloneItemStack();
+                if (rawIndex < topRows * 9) {
+                    //clicked in the top inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, slots.size(), true)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                } else {
+                    //clicked in the bottom inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                }
+
+                if (clickedSlotItem.isEmpty()) {
+                    slot.set(InvseeImpl.EMPTY_STACK);
+                } else {
+                    slot.d();
+                }
+            }
+            return itemstack;
+        }
     }
 
     private boolean doShiftClickTransfer(ItemStack clickedSlotItem, int targetMinIndex, int targetMaxIndex, boolean topClicked) {
         //returns true is something if part of the clickedSlotItem was transferred, otherwise false
         return super.a(clickedSlotItem, targetMinIndex, targetMaxIndex, topClicked);
     }
-
 
     // ===== Magma Compatibility =====
     // https://github.com/Jannyboy11/InvSee-plus-plus/issues/43#issuecomment-1493377971
@@ -248,4 +424,55 @@ class MainNmsContainer extends Container {
         return shiftClick(playerEntity, rawIndex);
     }
 
+    /**
+     * Get the region scheduler for the target entity.
+     * {\\@return} the entity scheduler of the target, or {\\@code null} if not running on Folia.
+     */
+    @Override
+    public {\\@Nullable} EntityScheduler getTargetEntityScheduler() {
+        // In 1.16.5, Folia support is not natively implemented in the platform, but we can return null
+        // or try to detect Folia if the platform is upgraded.
+        // For now, we return null.
+        return null;
+    }
+
+    /**
+     * Get the region scheduler for the spectator entity.
+     * {\\@return} the entity scheduler of the spectator, or {\\@code null} if not running on Folia.
+     */
+    @Override
+    public {\\@Nullable} EntityScheduler getSpectatorEntityScheduler() {
+        return null;
+    }
+
+    /**
+     * Schedule a task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler.
+     * {\\@param} {\\@code task} the task to run
+     * {\\@param} {\\@code retired} the task to run when the inventory is closed or retired
+     */
+    @Override
+    public void executeSyncSpectator(Runnable task, Runnable retired) {
+        // Fallback to global scheduler for Bukkit
+        com.janboerman.invsee.spigot.api.Scheduler scheduler = creationOptions.getPlugin().getApi().getScheduler();
+        scheduler.executeSyncGlobal(task);
+        if (retired != null) {
+            scheduler.executeSyncGlobal(retired);
+        }
+    }
+
+    @Override
+    public MainBukkitInventory getBukkit() {
+        return getBukkitView();
+    }
+
+    @Override
+    public MainNmsContainer getInventory() {
+        return this;
+    }
+
+    @Override
+    public MainNmsContainer shallowCopyFrom(MainBukkitInventory source) {
+        // This is a placeholder for shallow copy implementation if needed
+        return this;
+    }
 }

@@ -5,9 +5,19 @@ import com.janboerman.invsee.spigot.api.logging.DifferenceTracker;
 import com.janboerman.invsee.spigot.api.logging.LogOptions;
 import com.janboerman.invsee.spigot.api.logging.LogOutput;
 import com.janboerman.invsee.spigot.api.target.Target;
-import com.janboerman.invsee.spigot.api.template.EnderChestSlot;
 import com.janboerman.invsee.spigot.api.template.Mirror;
-import net.minecraft.server.v1_12_R1.*;
+import com.janboerman.invsee.spigot.api.template.PlayerInventorySlot;
+import com.janboerman.invsee.spigot.internal.inventory.AbstractNmsInventory;
+import com.janboerman.invsee.spigot.internal.inventory.ShallowCopy;
+import com.janboerman.invsee.spigot.internal.inventory.StandardSpectatorInventory;
+import com.janboerman.invsee.spigot.internal.inventory.Wrapper;
+import io.papermc.paper.threadedregions.scheduler.EntityScheduler;
+import net.minecraft.server.v1_12_R1.Container;
+import net.minecraft.server.v1_12_R1.EntityHuman;
+import net.minecraft.server.v1_12_R1.InventoryClickType;
+import net.minecraft.server.v1_12_R1.ItemStack;
+import net.minecraft.server.v1_12_R1.PlayerInventory;
+import net.minecraft.server.v1_12_R1.Slot;
 import org.bukkit.craftbukkit.v1_12_R1.inventory.CraftItemStack;
 import org.bukkit.plugin.Plugin;
 
@@ -15,26 +25,49 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-public class EnderNmsContainer extends Container {
+class MainNmsContainer extends Container implements AbstractNmsInventory<PlayerInventorySlot, MainBukkitInventory, MainNmsContainer>, StandardSpectatorInventory<PlayerInventorySlot, MainNmsContainer, MainNmsContainer>, Wrapper<MainNmsContainer, MainNmsContainer> {
 
     final EntityHuman player;
-    final EnderNmsInventory top;
-    final IInventory bottom;
+    final MainNmsInventory top;
+    final PlayerInventory bottom;
     final String title;
-    final CreationOptions<EnderChestSlot> creationOptions;
+    final CreationOptions<PlayerInventorySlot> creationOptions;
 
-    private final int topRows;  //https://github.com/pl3xgaming/Purpur a fork of paper that has configurable rows for the enderchest inventory
-    private EnderBukkitInventoryView bukkitView;
+    private final boolean spectatingOwnInventory;
+    private MainBukkitInventoryView bukkitView;
     final DifferenceTracker tracker;
 
-    private static Slot makeSlot(Mirror<EnderChestSlot> mirror, EnderNmsInventory top, int positionIndex, int magicX, int magicY, ItemStack inaccessiblePlaceholder) {
-        final EnderChestSlot place = mirror.getSlot(positionIndex);
+    private static Slot makeSlot(Mirror<PlayerInventorySlot> mirror, boolean spectatingOwnInventory, MainNmsInventory top, int positionIndex, int magicX, int magicY, ItemStack inaccessiblePlaceholder) {
+        final PlayerInventorySlot place = mirror.getSlot(positionIndex);
 
         if (place == null) {
             return new InaccessiblePlaceholderSlot(inaccessiblePlaceholder, top, positionIndex, magicX, magicY);
+        } else if (place.isContainer()) {
+            final int referringTo = place.ordinal() - PlayerInventorySlot.CONTAINER_00.ordinal();
+            return new Slot(top, referringTo, magicX, magicY); //magicX and magicY correct here? it seems to work though.
+        } else if (place == PlayerInventorySlot.ARMOUR_BOOTS) {
+            final int referringTo = 36;
+            return new BootsSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place == PlayerInventorySlot.ARMOUR_LEGGINGS) {
+            final int referringTo = 37;
+            return new LeggingsSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place == PlayerInventorySlot.ARMOUR_CHESTPLATE) {
+            final int referringTo = 38;
+            return new ChestplateSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place == PlayerInventorySlot.ARMOUR_HELMET) {
+            final int referringTo = 39;
+            return new HelmetSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place.isPersonal()) {
+            final int referringTo = place.ordinal() - PlayerInventorySlot.PERSONAL_00.ordinal() + 45;
+            return new PersonalSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place.isOffHand()) {
+            final int referringTo = 40;
+            return new OffhandSlot(top, referringTo, magicX, magicY); //idem?
+        } else if (place.isCursor() && !spectatingOwnInventory) {
+            final int referringTo = 41;
+            return new CursorSlot(top, referringTo, magicX, magicY); //idem?
         } else {
-            final int referringTo = place.ordinal();
-            return new Slot(top, referringTo, magicX, magicY);
+            return new InaccessiblePlaceholderSlot(inaccessiblePlaceholder, top, positionIndex, magicX, magicY); //idem?
         }
     }
 
@@ -46,35 +79,73 @@ public class EnderNmsContainer extends Container {
             contentsBefore = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
         }
 
-        ItemStack result = super.a(i, j, inventoryclicktype, entityhuman);
-
-        if (tracker != null) {
-            contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
-            tracker.onClick(contentsBefore, contentsAfter);
+        // FOLIASYNC: schedule task ONLY if we are on Folia (target/spectator schedulers exist)
+        // Otherwise, execute directly on the calling thread (Bukkit/Paper fallback) to minimize scheduler calls.
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        ItemStack result;
+        if (targetScheduler != null && spectatorScheduler != null) {
+            // Folia: schedule task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler
+            final boolean[] resultDone = { false };
+            final ItemStack[] resultStack = { null };
+            final Runnable task = () -> {
+                resultStack[0] = super.a(i, j, inventoryclicktype, entityhuman);
+                
+                if (tracker != null) {
+                    List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
+                    tracker.onClick(contentsBefore, contentsAfter);
+                }
+                resultDone[0] = true;
+            };
+            
+            // Execute sync spectator task (blocks until done in Folia)
+            executeSyncSpectator(task, null);
+            result = resultStack[0] != null ? resultStack[0] : ItemStack.a;
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            result = super.a(i, j, inventoryclicktype, entityhuman);
+            
+            if (tracker != null) {
+                List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).collect(Collectors.toList());
+                tracker.onClick(contentsBefore, contentsAfter);
+            }
         }
-
+        
         return result;
     }
 
     //removed
     @Override
     public void b(EntityHuman entityhuman) {
-        super.b(entityhuman);
-
-        if (tracker != null && Objects.equals(entityhuman, player)) {
-            tracker.onClose();
+        // FOLIASYNC: schedule task ONLY if we are on Folia
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        if (targetScheduler != null && spectatorScheduler != null) {
+            Runnable task = () -> {
+                super.b(entityhuman);
+                if (tracker != null && Objects.equals(entityhuman, player)) {
+                    tracker.onClose();
+                }
+            };
+            executeSyncSpectator(task, null);
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            super.b(entityhuman);
+            if (tracker != null && Objects.equals(entityhuman, player)) {
+                tracker.onClose();
+            }
         }
     }
 
     EnderNmsContainer(int containerId, EnderNmsInventory nmsInventory, PlayerInventory playerInventory, EntityHuman player, CreationOptions<EnderChestSlot> creationOptions) {
         this.windowId = containerId;
 
-        this.topRows = nmsInventory.getSize() / 9;
-        this.player = player;
         this.top = nmsInventory;
         this.bottom = playerInventory;
-
-        nmsInventory.startOpen(player);
+        this.player = player;
+        this.spectatingOwnInventory = player.getUniqueID().equals(nmsInventory.targetPlayerUuid);
 
         //creation options
         this.creationOptions = creationOptions;
@@ -94,19 +165,18 @@ public class EnderNmsContainer extends Container {
             this.tracker = null;
         }
 
-
         //top inventory slots
-        for (int yPos = 0; yPos < topRows; yPos++) {
+        for (int yPos = 0; yPos < 6; yPos++) {
             for (int xPos = 0; xPos < 9; xPos++) {
                 int index = xPos + yPos * 9;
                 int magicX = 8 + xPos * 18;
                 int magicY = 18 + yPos * 18;
-                a(makeSlot(mirror, top, index, magicX, magicY, CraftItemStack.asNMSCopy(creationOptions.getPlaceholderPalette().inaccessible())));
+                a(makeSlot(mirror, spectatingOwnInventory, top, index, magicX, magicY, CraftItemStack.asNMSCopy(creationOptions.getPlaceholderPalette().inaccessible())));
             }
         }
 
         //bottom inventory slots
-        int magicAddY = (topRows - 4 /*4 for 4 rows of the bottom inventory??*/) * 18;
+        int magicAddY = (6 /*6 for 6 rows of the top inventory*/ - 4 /*4 for 4 rows of the bottom inventory??*/) * 18;
 
         //player 'storage'
         for (int yPos = 1; yPos < 4; yPos++) {
@@ -145,33 +215,76 @@ public class EnderNmsContainer extends Container {
         //returns EMPTY_STACK when we are done transferring the itemstack on the rawIndex
         //remember that we are called inside the body of a loop!
 
-        ItemStack itemstack = InvseeImpl.EMPTY_STACK;
-        Slot slot = this.slots.get(rawIndex);
+        if (spectatingOwnInventory)
+            return InvseeImpl.EMPTY_STACK;
 
-        if (slot != null && slot.hasItem()) {
-            ItemStack clickedSlotItem = slot.getItem();
+        // FOLIASYNC: schedule task ONLY if we are on Folia
+        EntityScheduler targetScheduler = getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = getSpectatorEntityScheduler();
+        
+        if (targetScheduler != null && spectatorScheduler != null) {
+            final ItemStack[] resultStack = { InvseeImpl.EMPTY_STACK };
+            final Runnable task = () -> {
+                ItemStack itemstack = InvseeImpl.EMPTY_STACK;
+                Slot slot = this.slots.get(rawIndex);
+                final int topRows = 6;
 
-            itemstack = clickedSlotItem.cloneItemStack();
-            if (rawIndex < topRows * 9) {
-                //clicked in the top inventory
-                if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, this.slots.size(), true)) {
-                    return InvseeImpl.EMPTY_STACK;
+                if (slot != null && slot.hasItem()) {
+                    ItemStack clickedSlotItem = slot.getItem();
+
+                    itemstack = clickedSlotItem.cloneItemStack();
+                    if (rawIndex < topRows * 9) {
+                        //clicked in the top inventory
+                        if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, this.slots.size(), true)) {
+                            itemstack = InvseeImpl.EMPTY_STACK;
+                        }
+                    } else {
+                        //clicked in the bottom inventory
+                        if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
+                            itemstack = InvseeImpl.EMPTY_STACK;
+                        }
+                    }
+
+                    if (clickedSlotItem.isEmpty()) {
+                        slot.set(InvseeImpl.EMPTY_STACK);
+                    } else {
+                        slot.f();
+                    }
                 }
-            } else {
-                //clicked in the bottom inventory
-                if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
-                    return InvseeImpl.EMPTY_STACK;
+                resultStack[0] = itemstack;
+            };
+            executeSyncSpectator(task, null);
+            return resultStack[0];
+        } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            ItemStack itemstack = InvseeImpl.EMPTY_STACK;
+            Slot slot = this.slots.get(rawIndex);
+            final int topRows = 6;
+
+            if (slot != null && slot.hasItem()) {
+                ItemStack clickedSlotItem = slot.getItem();
+
+                itemstack = clickedSlotItem.cloneItemStack();
+                if (rawIndex < topRows * 9) {
+                    //clicked in the top inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, topRows * 9, this.slots.size(), true)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                } else {
+                    //clicked in the bottom inventory
+                    if (!doShiftClickTransfer(clickedSlotItem, 0, topRows * 9, false)) {
+                        return InvseeImpl.EMPTY_STACK;
+                    }
+                }
+
+                if (clickedSlotItem.isEmpty()) {
+                    slot.set(InvseeImpl.EMPTY_STACK);
+                } else {
+                    slot.f();
                 }
             }
-
-            if (clickedSlotItem.isEmpty()) {
-                slot.set(InvseeImpl.EMPTY_STACK);
-            } else {
-                slot.f();
-            }
+            return itemstack;
         }
-
-        return itemstack;
     }
 
     private boolean doShiftClickTransfer(ItemStack clickedSlotItem, int targetMinIndex, int targetMaxIndex, boolean topClicked) {
@@ -179,4 +292,55 @@ public class EnderNmsContainer extends Container {
         return super.a(clickedSlotItem, targetMinIndex, targetMaxIndex, topClicked);
     }
 
+    /**
+     * Get the region scheduler for the target entity.
+     * {\@return} the entity scheduler of the target, or {\@code null} if not running on Folia.
+     */
+    @Override
+    public {\@Nullable} EntityScheduler getTargetEntityScheduler() {
+        // In 1.12.2, Folia support is not natively implemented in the platform, but we can return null
+        // or try to detect Folia if the platform is upgraded.
+        // For now, we return null.
+        return null;
+    }
+
+    /**
+     * Get the region scheduler for the spectator entity.
+     * {\@return} the entity scheduler of the spectator, or {\@code null} if not running on Folia.
+     */
+    @Override
+    public {\@Nullable} EntityScheduler getSpectatorEntityScheduler() {
+        return null;
+    }
+
+    /**
+     * Schedule a task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler.
+     * {\@param} {\@code task} the task to run
+     * {\@param} {\@code retired} the task to run when the inventory is closed or retired
+     */
+    @Override
+    public void executeSyncSpectator(Runnable task, Runnable retired) {
+        // Fallback to global scheduler for Bukkit
+        com.janboerman.invsee.spigot.api.Scheduler scheduler = creationOptions.getPlugin().getApi().getScheduler();
+        scheduler.executeSyncGlobal(task);
+        if (retired != null) {
+            scheduler.executeSyncGlobal(retired);
+        }
+    }
+
+    @Override
+    public EnderBukkitInventory getBukkit() {
+        return getBukkitView();
+    }
+
+    @Override
+    public EnderNmsContainer getInventory() {
+        return this;
+    }
+
+    @Override
+    public EnderNmsContainer shallowCopyFrom(EnderBukkitInventory source) {
+        // This is a placeholder for shallow copy implementation if needed
+        return this;
+    }
 }

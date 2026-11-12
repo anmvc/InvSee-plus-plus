@@ -6,6 +6,8 @@ import com.janboerman.invsee.spigot.api.logging.Difference;
 import com.janboerman.invsee.spigot.api.logging.DifferenceTracker;
 import com.janboerman.invsee.spigot.api.template.EnderChestSlot;
 
+import io.papermc.paper.threadedregions.scheduler.EntityScheduler;
+
 import org.bukkit.craftbukkit.v1_17_R1.inventory.CraftItemStack;
 import org.bukkit.entity.HumanEntity;
 import org.bukkit.event.inventory.InventoryType;
@@ -39,32 +41,70 @@ class EnderBukkitInventoryView extends BukkitInventoryView<EnderChestSlot> imple
     }
 
     @Override
-    public String getTitle() {
-        return nms.title;
-    }
-
-    @Override
     public void setItem(int slot, ItemStack item) {
-        net.minecraft.world.item.ItemStack stack = CraftItemStack.asNMSCopy(item);
-        if (slot >= 0) {
-            nms.getSlot(slot).set(stack);
+// FOLIASYNC: schedule task ONLY if we are on Folia (target/spectator schedulers exist)
+        // Otherwise, execute directly on the calling thread (Bukkit/Paper fallback) to minimize scheduler calls.
+        EntityScheduler targetScheduler = nms.getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = nms.getSpectatorEntityScheduler();
+        
+        if (targetScheduler != null && spectatorScheduler != null) {
+            Runnable task = () -> {
+                if (slot >= 0) {
+                    nms.getSlot(slot).set(stack);
+                } else {
+                    nms.player.drop(stack, false);
+                }
+            };
+            // Execute sync spectator task (blocks until done in Folia)
+            executeSyncSpectator(task, null);
         } else {
-            nms.player.drop(stack, false);
+            // Bukkit/Paper: execute directly (0 scheduler calls)
+            if (slot >= 0) {
+                nms.getSlot(slot).set(stack);
+            } else {
+                nms.player.drop(stack, false);
+            }
         }
     }
 
     @Override
     public ItemStack getItem(int slot) {
-        if (slot < 0) {
-            return null;
+// FOLIASYNC: schedule task ONLY if we are on Folia (target/spectator schedulers exist)
+        // Otherwise, execute directly on the calling thread (Bukkit/Paper fallback) to minimize scheduler calls.
+        EntityScheduler targetScheduler = nms.getTargetEntityScheduler();
+        EntityScheduler spectatorScheduler = nms.getSpectatorEntityScheduler();
+        
+        if (targetScheduler != null && spectatorScheduler != null) {
+            final ItemStack[] resultStack = { null };
+            Runnable task = () -> {
+                net.minecraft.world.item.ItemStack nmsStack;
+                if (slot < 0) {
+                    resultStack[0] = null;
+                } else {
+                    if (slot < nms.top.getContainerSize()) {
+                        nmsStack = nms.top.getContents().get(slot);
+                    } else {
+                        nmsStack = nms.getSlot(slot).getItem();
+                    }
+                    resultStack[0] = CraftItemStack.asCraftMirror(nmsStack);
+                }
+            };
+            // Execute sync spectator task (blocks until done in Folia)
+            executeSyncSpectator(task, null);
+            return resultStack[0];
         } else {
+            // Bukkit/Paper: execute directly (0 scheduler calls)
             net.minecraft.world.item.ItemStack nmsStack;
-            if (slot < nms.top.getContainerSize()) {
-                nmsStack = nms.top.getContents().get(slot);
+            if (slot < 0) {
+                return null;
             } else {
-                nmsStack = nms.getSlot(slot).getItem();
+                if (slot < nms.top.getContainerSize()) {
+                    nmsStack = nms.top.getContents().get(slot);
+                } else {
+                    nmsStack = nms.getSlot(slot).getItem();
+                }
+                return CraftItemStack.asCraftMirror(nmsStack);
             }
-            return CraftItemStack.asCraftMirror(nmsStack);
         }
     }
 
@@ -74,8 +114,44 @@ class EnderBukkitInventoryView extends BukkitInventoryView<EnderChestSlot> imple
         return tracker == null ? null : tracker.getDifference();
     }
     
-	@Override
-	public InventoryType getType() {
-		return InventoryType.CHEST;
-	}
+    @Override
+    public InventoryType getType() {
+    	return InventoryType.CHEST;
+    }
+
+    /**
+     * Get the region scheduler for the target entity.
+     * {\@return} the entity scheduler of the target, or {\@code null} if not running on Folia.
+     */
+    @Override
+    public {\@Nullable} EntityScheduler getTargetEntityScheduler() {
+        // In 1.17.1, Folia support is not natively implemented in the platform, but we can return null
+        // or try to detect Folia if the platform is upgraded.
+        // For now, we return null.
+        return null;
+    }
+
+    /**
+     * Get the region scheduler for the spectator entity.
+     * {\@return} the entity scheduler of the spectator, or {\@code null} if not running on Folia.
+     */
+    @Override
+    public {\@Nullable} EntityScheduler getSpectatorEntityScheduler() {
+        return null;
+    }
+
+    /**
+     * Schedule a task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler.
+     * {\@param} {\@code task} the task to run
+     * {\@param} {\@code retired} the task to run when the inventory is closed or retired
+     */
+    @Override
+    public void executeSyncSpectator(Runnable task, Runnable retired) {
+        // Fallback to global scheduler for Bukkit
+        com.janboerman.invsee.spigot.api.Scheduler scheduler = nms.creationOptions.getPlugin().getApi().getScheduler();
+        scheduler.executeSyncGlobal(task);
+        if (retired != null) {
+            scheduler.executeSyncGlobal(retired);
+        }
+    }
 }
