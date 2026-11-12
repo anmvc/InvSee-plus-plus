@@ -153,7 +153,7 @@ Server support matrix:
 |----------------------------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|--------|--------|--------|--------|--------|---------|--------|---------|---------|
 | CraftBukkit                | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 1  |
 | Paper                      | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 2  |
-| Folia                      | n/a    | n/a    | n/a     | n/a    | n/a    | planned | -      | -      | planned | -      | -      | -      | -      | -      | -      | -      | -       | -      | -       | planned |
+| Folia                      | n/a    | n/a    | n/a     | n/a    | n/a    | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 2  |
 | UniverseSpigot             | n/a    | n/a    | n/a     | n/a    | n/a    | n/a     | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 2  |
 | Other forks of CraftBukkit | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 2  |
 | (Neo)Forge/Bukkit hybrids  | Tier 2 | Tier 2 | Tier 2* | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2 | Tier 2  | Tier 2 | Tier 2  | Tier 2  |
@@ -164,6 +164,20 @@ Server support matrix:
 and there is a good chance they won't be able to load mods and plugins compiled for newer Java versions.
 
 Is there any server that implements the Bukkit api that I'm missing? Don't hesitate to create [an issue](https://github.com/Jannyboy11/InvSee-plus-plus/issues/new) and request support! 
+
+### Folia
+
+InvSee++ runs on [Folia](https://github.com/PaperMC/Folia) from Minecraft 1.19.4 onwards. Folia assigns every entity to the
+thread of the region it is in, which means that a player's inventory may only be read from and written to by that player's
+own thread. A spectator inventory view shows the items of the spectator and the items of the target player inside one
+window, so a click inside that window touches two inventories which - on Folia - are owned by two different threads.
+See [issue #58](https://github.com/Jannyboy11/InvSee-plus-plus/issues/58).
+
+InvSee++ solves this by turning every click into a transaction: the change which the click makes to the target player's
+inventory is computed as a difference, the change is undone on the spectator's thread, and the difference is then applied
+on the scheduler of the target player - the only thread which is allowed to touch their inventory. Because a click also
+changes the spectator's own inventory and the item stack on their cursor, a transaction is never rolled back: if the
+target player changed one of the affected slots in the meantime, then the spectator's change wins.
 
 
 [![Historic Minecraft Version Usage](https://faststats.dev/embed/010faaef-face-4f9d-8288-61621c708031?w=800&h=300)](https://faststats.dev/project/invsee-plus-plus/invsee++)

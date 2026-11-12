@@ -17,10 +17,16 @@ public class DefaultScheduler implements Scheduler {
     }
 
     @Override
+    public boolean isFolia() {
+        return false;
+    }
+
+    @Override
     public void executeSyncPlayer(UUID playerId, Runnable task, Runnable retired) {
         executeSync(task);
     }
 
+    @Override
     public void executeSyncPlayer(HumanEntity player, Runnable task, Runnable retired) {
         executeSync(task);
     }

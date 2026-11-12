@@ -19,6 +19,8 @@ import org.bukkit.plugin.Plugin;
 
 import java.util.List;
 import java.util.Objects;
+import com.janboerman.invsee.spigot.api.Scheduler;
+import com.janboerman.invsee.spigot.internal.transaction.InventoryTransaction;
 
 class MainNmsContainer extends AbstractContainerMenu {
 
@@ -32,6 +34,46 @@ class MainNmsContainer extends AbstractContainerMenu {
 	private final boolean spectatingOwnInventory;
 	private MainBukkitInventoryView bukkitView;
 	final DifferenceTracker tracker;
+
+	private static final InventoryTransaction.Items<ItemStack> ITEMS = new InventoryTransaction.Items<ItemStack>() {
+		@Override public boolean isEmpty(ItemStack stack) { return stack.isEmpty(); }
+
+		@Override public ItemStack copy(ItemStack stack) { return stack.isEmpty() ? ItemStack.EMPTY : stack.copy(); }
+
+		@Override public boolean matches(ItemStack one, ItemStack other) {
+			if (one == other) return true;
+			boolean oneEmpty = one.isEmpty(), otherEmpty = other.isEmpty();
+			if (oneEmpty != otherEmpty) return false;
+			if (oneEmpty) return true; //both are empty
+			//expensive: compare the item stacks' data.
+			org.bukkit.inventory.ItemStack bukkitOne = CraftItemStack.asBukkitCopy(one);
+			org.bukkit.inventory.ItemStack bukkitTwo = CraftItemStack.asBukkitCopy(other);
+			return bukkitOne.getAmount() == bukkitTwo.getAmount() && bukkitOne.isSimilar(bukkitTwo);
+		}
+	};
+
+	private final InventoryTransaction<ItemStack> transaction;
+
+	/**
+	 * Creates the transaction helper which replays the changes made by clicks to the target player's inventory on
+	 * the thread which owns that inventory. Returns null when the changes can be applied directly, which is the case
+	 * when the server does not use threaded regions, or when the spectating player is the target player.
+	 */
+	private InventoryTransaction<ItemStack> createTransaction() {
+		if (spectatingOwnInventory) return null; //the spectating player *is* the target player: their inventory is owned by this thread.
+		Plugin plugin = creationOptions.getPlugin();
+		if (plugin == null) return null;
+		Scheduler scheduler = Scheduler.findScheduler(plugin);
+		if (scheduler == null || !scheduler.isFolia()) return null;
+		return new InventoryTransaction<>(scheduler, top.targetPlayerUuid, plugin.getServer().getPlayer(top.targetPlayerUuid) != null,
+				new InventoryTransaction.Inventory<ItemStack>() {
+					@Override public int size() { return top.getContainerSize(); }
+					@Override public ItemStack get(int slot) { return top.getItem(slot); }
+					@Override public void set(int slot, ItemStack item) { top.setItemSilently(slot, item); }
+					@Override public void markChanged() { top.setChanged(); }
+				}, ITEMS);
+	}
+
 
 	private static Slot makeSlot(Mirror<PlayerInventorySlot> mirror, boolean spectatingOwnInventory, MainNmsInventory top, int positionIndex, int magicX, int magicY,
 								 ItemStack inaccessiblePlaceholder) {
@@ -71,22 +113,38 @@ class MainNmsContainer extends AbstractContainerMenu {
 	// decorate clicked method for tracking/logging
 	@Override
 	public void clicked(int i, int j, ClickType inventoryclicktype, Player entityhuman) {
-		//TODO Folia: schedule task that is synchronised across both the target player's EntityScheduler as well as the spectator player's EntityScheduler.
-		//TODO because now we have a data race.
-		//TODO when we arrive here, we are in the tick thread of the Spectator player.
-		//TODO an STM-type solution is probably the best - we make changes to a dummy top inventory and commit each change (item diffs) to the real inventory in the target entity scheduler thread.
-		//TODO need to properly take care of aborts/rollbacks if a diff can't be replayed on the real inventory.
-
-		List<org.bukkit.inventory.ItemStack> contentsBefore = null, contentsAfter;
+		final List<org.bukkit.inventory.ItemStack> contentsBefore;
 		if (tracker != null) {
 			contentsBefore = top.getContents().stream().map(CraftItemStack::asBukkitCopy).toList();
+		} else {
+			contentsBefore = null;
 		}
 
-		super.clicked(i, j, inventoryclicktype, entityhuman);
+		Runnable handleClick = () -> {
+			super.clicked(i, j, inventoryclicktype, entityhuman);
 
-		if (tracker != null) {
-			contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).toList();
-			tracker.onClick(contentsBefore, contentsAfter);
+			if (tracker != null) {
+				//note: this happens *inside* the transaction, because the transaction undoes the changes which the
+				//click just made to the target player's inventory.
+				List<org.bukkit.inventory.ItemStack> contentsAfter = top.getContents().stream().map(CraftItemStack::asBukkitCopy).toList();
+				tracker.onClick(contentsBefore, contentsAfter);
+			}
+		};
+
+		if (transaction == null) {
+			handleClick.run();
+		} else {
+			// Folia: the target player's inventory is owned by the thread of the region the target player is in,
+			// whereas this method runs on the thread of the region the spectating player is in.
+			// Therefore the click is computed against a snapshot of the target player's inventory, and the
+			// resulting changes are replayed on the scheduler of the target player.
+			// See https://github.com/Jannyboy11/InvSee-plus-plus/issues/58
+				top.suppressSetChanged = true;
+			try {
+				transaction.transact(handleClick);
+			} finally {
+				top.suppressSetChanged = false;
+			}
 		}
 	}
 
@@ -109,6 +167,7 @@ class MainNmsContainer extends AbstractContainerMenu {
 		this.spectatingOwnInventory = spectator.getUUID().equals(nmsInventory.targetPlayerUuid);
 
 		this.creationOptions = creationOptions;
+		this.transaction = createTransaction();
 		Target target = Target.byGameProfile(nmsInventory.targetPlayerUuid, nmsInventory.targetPlayerName);
 		this.originalTitle = creationOptions.getTitle().titleFor(target);
 		Mirror<PlayerInventorySlot> mirror = creationOptions.getMirror();
