@@ -179,6 +179,18 @@ on the scheduler of the target player - the only thread which is allowed to touc
 changes the spectator's own inventory and the item stack on their cursor, a transaction is never rolled back: if the
 target player changed one of the affected slots in the meantime, then the spectator's change wins.
 
+Nothing is scheduled unless there is something to schedule:
+
+| | what happens on a click | tasks scheduled per click |
+|---|---|---|
+| Server without threaded regions | the click is applied straight away | 0 |
+| Folia, target player is offline | the click is applied straight away; clicks of concurrent spectators are serialised with a lock | 0 |
+| Folia, spectator is the target | the click is applied straight away | 0 |
+| Folia, target player is online | the difference is replayed on the target player's scheduler; consecutive clicks are batched | at most 1 per tick, and 0 if the click changed nothing |
+
+The inventory of an offline player is a detached copy which no region owns, so spectating an offline player works exactly
+like it does on a server without threaded regions - including applying the click immediately, with no delay.
+
 
 [![Historic Minecraft Version Usage](https://faststats.dev/embed/010faaef-face-4f9d-8288-61621c708031?w=800&h=300)](https://faststats.dev/project/invsee-plus-plus/invsee++)
 

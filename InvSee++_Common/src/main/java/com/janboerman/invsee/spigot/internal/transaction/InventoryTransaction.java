@@ -45,6 +45,12 @@ import com.janboerman.invsee.spigot.api.Scheduler;
  * <p>
  * This class is thread-safe: {@link #transact(Runnable)} is called by the thread of the spectator, while the changes
  * are committed by the thread of the target player.
+ * <p>
+ * <b>Scheduler usage.</b> This class is only used when the target player is <em>online</em>: that is the only case in
+ * which a region owns their inventory. An instance schedules at most one task per tick, only schedules one when the
+ * click actually changed something, and does not schedule anything at all when the click changed nothing. Spectators
+ * of an <em>offline</em> player do not use this class at all - the inventory of an offline player is a detached copy
+ * which no region owns - and servers without threaded regions never use it either.
  *
  * @param <I> the item stack type
  */
@@ -86,7 +92,6 @@ public final class InventoryTransaction<I> {
 
     private final Scheduler scheduler;
     private final UUID targetPlayerId;
-    private final boolean targetPlayerOnline;
     private final Inventory<I> targetInventory;
     private final Items<I> items;
 
@@ -98,15 +103,13 @@ public final class InventoryTransaction<I> {
      *
      * @param scheduler the scheduler used to schedule tasks on the target player's thread
      * @param targetPlayerId the unique ID of the target player
-     * @param targetPlayerOnline whether the target player is online
      * @param targetInventory the target player's inventory
      * @param items the item stack operations
      */
-    public InventoryTransaction(Scheduler scheduler, UUID targetPlayerId, boolean targetPlayerOnline,
+    public InventoryTransaction(Scheduler scheduler, UUID targetPlayerId,
                                 Inventory<I> targetInventory, Items<I> items) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler cannot be null");
         this.targetPlayerId = Objects.requireNonNull(targetPlayerId, "targetPlayerId cannot be null");
-        this.targetPlayerOnline = targetPlayerOnline;
         this.targetInventory = Objects.requireNonNull(targetInventory, "targetInventory cannot be null");
         this.items = Objects.requireNonNull(items, "items cannot be null");
     }
@@ -172,15 +175,10 @@ public final class InventoryTransaction<I> {
         };
 
         try {
-            if (targetPlayerOnline) {
-                //the target player is online: only their own entity scheduler may touch their inventory.
-                //if the entity is retired in the meantime, then we simply apply the changes on the global region.
-                scheduler.executeSyncPlayer(targetPlayerId, commit, commit);
-            } else {
-                //the target player's inventory is not owned by any entity: use the global region so that all
-                //transactions for this inventory are serialised with respect to each other.
-                scheduler.executeSyncGlobal(commit);
-            }
+            //only the target player's own entity scheduler may touch their inventory. If the entity is retired in the
+            //meantime (for instance because the target player left the server), then the changes are applied on the
+            //global region instead.
+            scheduler.executeSyncPlayer(targetPlayerId, commit, commit);
         } catch (RuntimeException e) {
             //the task could not be scheduled (for instance because the plugin was disabled).
             //do not lose the changes: apply them right away.

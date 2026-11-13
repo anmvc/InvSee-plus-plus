@@ -70,19 +70,41 @@ class EnderNmsContainer extends AbstractContainerMenu {
 	};
 
 	private final InventoryTransaction<ItemStack> transaction;
+	private final Object clickLock;
+
+	/**
+	 * Get the lock which serialises the clicks of two or more spectators that have this inventory open at the same
+	 * time, for inventories which no region owns. Returns null when clicks do not need to be serialised.
+	 * <p>
+	 * This is the case on servers which use threaded regions (Folia) when the target player is offline: their
+	 * inventory is then a detached copy which no region owns, so there is nothing to schedule - the changes can be
+	 * applied straight away. Two spectators can still have that same inventory open at the same time though, so
+	 * their clicks do need to be serialised against each other.
+	 */
+	private Object createClickLock() {
+		if (player.getUUID().equals(top.targetPlayerUuid)) return null; //the spectating player *is* the target player: nobody else can touch their inventory.
+		Plugin plugin = creationOptions.getPlugin();
+		if (plugin == null) return null;
+		Scheduler scheduler = Scheduler.findScheduler(plugin);
+		if (scheduler == null || !scheduler.isFolia()) return null; //no threaded regions: the server has one thread.
+		if (plugin.getServer().getPlayer(top.targetPlayerUuid) != null) return null; //the target player is online: the transaction replays the changes instead.
+		return top.clickLock;
+	}
 
 	/**
 	 * Creates the transaction helper which replays the changes made by clicks to the target player's inventory on
-	 * the thread which owns that inventory. Returns null when the changes can be applied directly, which is the case
-	 * when the server does not use threaded regions, or when the spectating player is the target player.
+	 * the thread which owns that inventory. Returns null when the changes can be applied straight away, which is the
+	 * case when the server does not use threaded regions, when the target player is offline, or when the spectating
+	 * player is the target player. Exactly one of this method and {@link #createClickLock()} returns a non-null value.
 	 */
 	private InventoryTransaction<ItemStack> createTransaction() {
+		if (clickLock != null) return null; //the target player is offline: the clicks are serialised instead.
 		if (player.getUUID().equals(top.targetPlayerUuid)) return null; //the spectating player *is* the target player: their inventory is owned by this thread.
 		Plugin plugin = creationOptions.getPlugin();
 		if (plugin == null) return null;
 		Scheduler scheduler = Scheduler.findScheduler(plugin);
-		if (scheduler == null || !scheduler.isFolia()) return null;
-		return new InventoryTransaction<>(scheduler, top.targetPlayerUuid, plugin.getServer().getPlayer(top.targetPlayerUuid) != null,
+		if (scheduler == null || !scheduler.isFolia()) return null; //no threaded regions: the server has one thread.
+		return new InventoryTransaction<>(scheduler, top.targetPlayerUuid,
 				new InventoryTransaction.Inventory<ItemStack>() {
 					@Override public int size() { return top.getContainerSize(); }
 					@Override public ItemStack get(int slot) { return top.getItem(slot); }
@@ -124,15 +146,24 @@ class EnderNmsContainer extends AbstractContainerMenu {
 			}
 		};
 
-		if (transaction == null) {
-			handleClick.run();
-		} else {
+		if (transaction != null) {
 			// Folia: the target player's inventory is owned by the thread of the region the target player is in,
 			// whereas this method runs on the thread of the region the spectating player is in.
 			// Therefore the click is computed against a snapshot of the target player's inventory, and the
 			// resulting changes are replayed on the scheduler of the target player.
 			// See https://github.com/Jannyboy11/InvSee-plus-plus/issues/58
 			transaction.transact(handleClick);
+		} else if (clickLock != null) {
+			// Folia: the target player is offline, so their inventory is a detached copy which no region owns and
+			// there is nothing to schedule. Multiple spectators can have it open at the same time though, so
+			// their clicks are serialised. See https://github.com/Jannyboy11/InvSee-plus-plus/issues/58
+			synchronized (clickLock) {
+				handleClick.run();
+			}
+		} else {
+			// No threaded regions: the server has a single thread, so the click can be applied straight away.
+			// This is also the case when the spectating player is the target player.
+			handleClick.run();
 		}
 	}
 
@@ -155,6 +186,7 @@ class EnderNmsContainer extends AbstractContainerMenu {
 		this.bottom = playerInventory;
 
 		this.creationOptions = creationOptions;
+		this.clickLock = createClickLock();
 		this.transaction = createTransaction();
 		Target target = Target.byGameProfile(nmsInventory.targetPlayerUuid, nmsInventory.targetPlayerName);
 		this.originalTitle = creationOptions.getTitle().titleFor(target);
