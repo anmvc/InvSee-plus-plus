@@ -829,12 +829,11 @@ public class InvseeAPI {
         future.whenComplete((SpectateResponse<MainSpectatorInventory> response, Throwable throwable) -> {
             if (throwable == null) {
                 if (response.isSuccess()) {
-                    try {
-                        OpenResponse<MainSpectatorInventoryView> openResponse = platform.openMainSpectatorInventory(spectator, response.getInventory(), options);
-                        result.complete(openResponse);
-                    } catch (Throwable ex) {
-                        result.completeExceptionally(ex);
-                    }
+                    //the SpectateResponse was computed on the target player's thread, but the window must be opened
+                    //on the thread of the spectating player. (On servers without threaded regions this is the same
+                    //thread, so then we open the window straight away.)
+                    openOnSpectatorsThread(spectator, result,
+                            () -> platform.openMainSpectatorInventory(spectator, response.getInventory(), options));
                 } else {
                     result.complete(OpenResponse.closed(NotOpenedReason.notCreated(response.getReason())));
                 }
@@ -850,12 +849,11 @@ public class InvseeAPI {
         future.whenComplete((SpectateResponse<EnderSpectatorInventory> response, Throwable throwable) -> {
             if (throwable == null) {
                 if (response.isSuccess()) {
-                    try {
-                        OpenResponse<EnderSpectatorInventoryView> openResponse = platform.openEnderSpectatorInventory(spectator, response.getInventory(), options);
-                        result.complete(openResponse);
-                    } catch (Throwable ex) {
-                        result.completeExceptionally(ex);
-                    }
+                    //the SpectateResponse was computed on the target player's thread, but the window must be opened
+                    //on the thread of the spectating player. (On servers without threaded regions this is the same
+                    //thread, so then we open the window straight away.)
+                    openOnSpectatorsThread(spectator, result,
+                            () -> platform.openEnderSpectatorInventory(spectator, response.getInventory(), options));
                 } else {
                     result.complete(OpenResponse.closed(NotOpenedReason.notCreated(response.getReason())));
                 }
@@ -864,6 +862,34 @@ public class InvseeAPI {
             }
         });
         return result;
+    }
+
+    /**
+     * Opens the spectator inventory window on the thread which owns the spectating player.
+     * On servers without threaded regions this is the main thread, and the window is opened straight away.
+     *
+     * @param spectator the spectating player
+     * @param result the future which is completed with the result of opening the window
+     * @param open the action which opens the window
+     * @param <V> the type of the inventory view
+     */
+    private <V> void openOnSpectatorsThread(Player spectator, CompletableFuture<OpenResponse<V>> result, Supplier<OpenResponse<V>> open) {
+        Scheduler scheduler = getScheduler();
+        if (scheduler != null && scheduler.isFolia()) {
+            scheduler.executeSyncPlayer(spectator, () -> {
+                try {
+                    result.complete(open.get());
+                } catch (Throwable ex) {
+                    result.completeExceptionally(ex);
+                }
+            });
+        } else {
+            try {
+                result.complete(open.get());
+            } catch (Throwable ex) {
+                result.completeExceptionally(ex);
+            }
+        }
     }
 
     // ================================== Event Stuff ==================================

@@ -19,6 +19,17 @@ public abstract class AbstractNmsInventory<Slot, Bukkit extends SpectatorInvento
     public final UUID targetPlayerUuid;
     public final String targetPlayerName;
 
+    /**
+     * Lock which is used to serialise the clicks of two or more spectators which have this inventory open at the same
+     * time, in the case where no region owns this inventory.
+     * <p>
+     * On servers which use threaded regions (Folia) the inventory of an <em>offline</em> player is a detached copy
+     * which no region owns, so clicks on it do not need to be scheduled. Multiple spectators can still have that same
+     * inventory open at the same time though (InvSee++ re-uses the inventory of an offline player which is already
+     * open), so their clicks do need to be serialised.
+     */
+    public final Object clickLock = new Object();
+
     public final CreationOptions<Slot> creationOptions;
     private Bukkit bukkit;
 

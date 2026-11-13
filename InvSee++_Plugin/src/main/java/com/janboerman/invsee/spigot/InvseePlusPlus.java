@@ -431,11 +431,12 @@ public class InvseePlusPlus extends JavaPlugin implements com.janboerman.invsee.
         try {
             Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
             folia = true;
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | LinkageError e) {
             folia = false;
         }
 
         if (folia) {
+            plugin.getLogger().info("Detected Folia (threaded regions). Using the Folia scheduler.");
             return new FoliaScheduler(plugin);
         } else {
             return new DefaultScheduler(plugin);

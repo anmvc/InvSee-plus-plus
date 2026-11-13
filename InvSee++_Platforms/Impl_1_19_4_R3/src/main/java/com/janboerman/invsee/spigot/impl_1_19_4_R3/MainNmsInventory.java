@@ -227,6 +227,9 @@ class MainNmsInventory extends AbstractNmsInventory<PlayerInventorySlot, MainBuk
 
 	@Override
 	public void setChanged() {
+		//Folia: while a click transaction is in progress, the target player's inventory is not actually
+		//changed yet, so we must not notify the target player's inventory menu.
+		if (suppressSetChanged) return;
 		//update target player cached crafting recipe:
 		updateTargetCraftingResults.run();
 	}
@@ -300,4 +303,17 @@ class MainNmsInventory extends AbstractNmsInventory<PlayerInventorySlot, MainBuk
 		return stillValid(player);
 	}
 
+
+	//Folia: set to true by MainNmsContainer while a click transaction is in progress. See #setChanged().
+	boolean suppressSetChanged;
+
+	/**
+	 * Sets the item stack in the given slot, without calling {@link #setChanged()}.
+	 * Used by the transaction support in {@link MainNmsContainer} to undo the changes which a click made to the
+	 * target player's inventory, before those changes are replayed on the target player's own thread.
+	 */
+	void setItemSilently(int slot, ItemStack stack) {
+		var ref = decideWhichItem(slot);
+		if (ref != null) ref.set(stack);
+	}
 }
