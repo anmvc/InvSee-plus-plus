@@ -156,10 +156,9 @@ class MainNmsContainer extends AbstractContainerMenu {
 			}
 		};
 
-		if (transaction != null) {
-			// Folia: the target player's inventory is owned by the thread of the region the target player is in,
-			// whereas this method runs on the thread of the region the spectating player is in.
-			// Therefore the click is computed against a snapshot of the target player's inventory, and the
+		if (transaction != null && !transaction.isOwnedByCurrentThread()) {
+			// Folia: the target player's inventory is owned by another region's thread, so it may not be touched
+			// from here. The click is computed against a snapshot of the target player's inventory, and the
 			// resulting changes are replayed on the scheduler of the target player.
 			// See https://github.com/Jannyboy11/InvSee-plus-plus/issues/58
 			top.suppressSetChanged = true;
@@ -176,8 +175,9 @@ class MainNmsContainer extends AbstractContainerMenu {
 				handleClick.run();
 			}
 		} else {
-			// No threaded regions: the server has a single thread, so the click can be applied straight away.
-			// This is also the case when the spectating player is the target player.
+			// This thread owns the target player's inventory as well - because the server has a single thread,
+			// because the spectating player is the target player, or because both players are inside the same
+			// region - so the click can be applied straight away. No snapshot, nothing to schedule.
 			handleClick.run();
 		}
 	}

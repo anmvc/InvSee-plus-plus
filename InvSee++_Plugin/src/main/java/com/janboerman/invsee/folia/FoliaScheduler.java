@@ -27,6 +27,18 @@ public class FoliaScheduler implements Scheduler {
     }
 
     @Override
+    public boolean isOwnedByCurrentThread(UUID playerId) {
+        Player player = plugin.getServer().getPlayer(playerId);
+        if (player == null) return false;
+
+        //Note: isOwnedByCurrentRegion does not read the entity's data itself - it only asks which region owns it - so
+        //it is safe to call from any thread. That is exactly what it exists for.
+        //When the spectator and the target player are inside the same region, this is the same thread, and the
+        //caller can touch the target player's inventory directly instead of scheduling a task for it.
+        return plugin.getServer().isOwnedByCurrentRegion(player);
+    }
+
+    @Override
     public void executeSyncPlayer(UUID playerId, Runnable task, Runnable retired) {
         Player player = plugin.getServer().getPlayer(playerId);
         if (player != null) {

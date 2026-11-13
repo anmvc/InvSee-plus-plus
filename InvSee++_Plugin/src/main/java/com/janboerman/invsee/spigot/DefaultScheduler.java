@@ -22,6 +22,12 @@ public class DefaultScheduler implements Scheduler {
     }
 
     @Override
+    public boolean isOwnedByCurrentThread(UUID playerId) {
+        //servers without threaded regions have one thread which owns everything.
+        return plugin.getServer().isPrimaryThread();
+    }
+
+    @Override
     public void executeSyncPlayer(UUID playerId, Runnable task, Runnable retired) {
         executeSync(task);
     }

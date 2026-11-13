@@ -59,6 +59,23 @@ public interface Scheduler {
     }
 
     /**
+     * Get whether the calling thread is the thread which owns the data of the player with the given unique ID.
+     * <p>
+     * When this is the case, the caller does not need to schedule anything: it may read and write the player's data
+     * right away. On servers which use threaded regions this is the case when the calling thread is ticking the
+     * region which owns the player - which is the common case for two players which are close to each other.
+     * <p>
+     * Implementations must be conservative: returning false when in doubt is always safe, returning true when the
+     * calling thread does <em>not</em> own the player is not.
+     *
+     * @param playerId the unique ID of the player
+     * @return true when the calling thread may read and write the player's data right now
+     */
+    public default boolean isOwnedByCurrentThread(UUID playerId) {
+        return false;
+    }
+
+    /**
      * Schedule a task to run on the thread which owns the player with the given unique ID.
      * If the player is no longer owned by any region, then the task is run on the global region.
      *

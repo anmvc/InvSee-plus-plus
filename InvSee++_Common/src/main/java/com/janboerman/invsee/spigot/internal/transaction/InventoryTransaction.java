@@ -46,11 +46,17 @@ import com.janboerman.invsee.spigot.api.Scheduler;
  * This class is thread-safe: {@link #transact(Runnable)} is called by the thread of the spectator, while the changes
  * are committed by the thread of the target player.
  * <p>
- * <b>Scheduler usage.</b> This class is only used when the target player is <em>online</em>: that is the only case in
- * which a region owns their inventory. An instance schedules at most one task per tick, only schedules one when the
- * click actually changed something, and does not schedule anything at all when the click changed nothing. Spectators
- * of an <em>offline</em> player do not use this class at all - the inventory of an offline player is a detached copy
- * which no region owns - and servers without threaded regions never use it either.
+ * <b>When to use this class.</b> Only use it when the calling thread does <em>not</em> own the target player's
+ * inventory: use {@link #isOwnedByCurrentThread()} to find out. When the calling thread does own it - which on a
+ * server with threaded regions means that the spectator and the target player are inside the same region - the
+ * action can simply be run, and using this class would only add work.
+ * <p>
+ * This class is only used at all when the target player is <em>online</em>: that is the only case in which a region
+ * owns their inventory. The inventory of an offline player is a detached copy which no region owns, and servers
+ * without threaded regions have a single thread which owns everything.
+ * <p>
+ * One call to {@link #transact(Runnable)} schedules at most one task - and none at all when the action did not
+ * change the target player's inventory.
  *
  * @param <I> the item stack type
  */
@@ -94,9 +100,6 @@ public final class InventoryTransaction<I> {
     private final UUID targetPlayerId;
     private final Inventory<I> targetInventory;
     private final Items<I> items;
-
-    private final List<SlotChange<I>> pending = new ArrayList<>();
-    private boolean commitScheduled;
 
     /**
      * Create a new transaction helper.
@@ -156,21 +159,28 @@ public final class InventoryTransaction<I> {
             targetInventory.set(change.slot, before[change.slot]);
         }
 
-        //5. schedule the changes to be applied on the target player's own thread.
-        boolean schedule;
-        synchronized (pending) {
-            for (SlotChange<I> change : changes) pending.add(change);
-            schedule = !commitScheduled;
-            commitScheduled = true;
-        }
-        if (schedule) scheduleCommit();
+        //5. apply the changes on the thread which owns the target player's inventory.
+        scheduleCommit(changes);
     }
 
-    private void scheduleCommit() {
+    /**
+     * Get whether the calling thread is the thread which owns the target player's inventory.
+     * <p>
+     * When it is, {@link #transact(Runnable)} should not be used at all: the action can simply be run, because the
+     * calling thread is allowed to touch the target player's inventory anyway. Doing that is cheaper (no snapshot,
+     * no difference to replay, nothing to schedule) and the change is visible immediately instead of one tick later.
+     *
+     * @return true when the calling thread owns the target player's inventory
+     */
+    public boolean isOwnedByCurrentThread() {
+        return scheduler.isOwnedByCurrentThread(targetPlayerId);
+    }
+
+    private void scheduleCommit(final List<SlotChange<I>> changes) {
         Runnable commit = new Runnable() {
             @Override
             public void run() {
-                commitPending();
+                applyChanges(changes);
             }
         };
 
@@ -182,30 +192,15 @@ public final class InventoryTransaction<I> {
         } catch (RuntimeException e) {
             //the task could not be scheduled (for instance because the plugin was disabled).
             //do not lose the changes: apply them right away.
-            commitPending();
+            applyChanges(changes);
         }
     }
 
-    private void commitPending() {
-        //keep going until everything which has been added in the meantime has been committed as well:
-        //in the meantime, transact(Runnable) sees that a commit is already scheduled and adds its changes to
-        //'pending' instead of scheduling a second commit.
-        while (true) {
-            List<SlotChange<I>> changes;
-            synchronized (pending) {
-                if (pending.isEmpty()) {
-                    commitScheduled = false;
-                    return;
-                }
-                changes = new ArrayList<>(pending);
-                pending.clear();
-            }
-
-            for (SlotChange<I> change : changes) {
-                targetInventory.set(change.slot, change.item);
-            }
-            targetInventory.markChanged();
+    private void applyChanges(List<SlotChange<I>> changes) {
+        for (SlotChange<I> change : changes) {
+            targetInventory.set(change.slot, change.item);
         }
+        targetInventory.markChanged();
     }
 
     private static final class SlotChange<I> {

@@ -181,15 +181,20 @@ target player changed one of the affected slots in the meantime, then the specta
 
 Nothing is scheduled unless there is something to schedule:
 
-| | what happens on a click | tasks scheduled per click |
+| | what happens on a click | tasks scheduled |
 |---|---|---|
 | Server without threaded regions | the click is applied straight away | 0 |
 | Folia, target player is offline | the click is applied straight away; clicks of concurrent spectators are serialised with a lock | 0 |
 | Folia, spectator is the target | the click is applied straight away | 0 |
-| Folia, target player is online | the difference is replayed on the target player's scheduler; consecutive clicks are batched | at most 1 per tick, and 0 if the click changed nothing |
+| Folia, both players in the same region | the click is applied straight away - the thread which handles the click is already the thread which owns the target player | 0 |
+| Folia, the players are in different regions | the difference is replayed on the target player's scheduler | 1, and 0 if the click changed nothing |
 
-The inventory of an offline player is a detached copy which no region owns, so spectating an offline player works exactly
-like it does on a server without threaded regions - including applying the click immediately, with no delay.
+Two things follow from this. Spectating an offline player behaves exactly like it does on a server without threaded
+regions - the inventory of an offline player is a detached copy which no region owns. And spectating a player who is
+standing near you also needs no scheduling at all: if both players are inside the same region, the thread which handles
+the click is the thread which owns both of their inventories, so the click can simply be applied. Only when the two
+players are in different regions is a task scheduled - and then the change lands in the target player's inventory one
+tick later. InvSee++ checks this with Server#isOwnedByCurrentRegion, which is safe to call from any thread.
 
 
 [![Historic Minecraft Version Usage](https://faststats.dev/embed/010faaef-face-4f9d-8288-61621c708031?w=800&h=300)](https://faststats.dev/project/invsee-plus-plus/invsee++)
